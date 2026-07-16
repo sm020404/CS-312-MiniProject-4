@@ -1,7 +1,6 @@
 require('dotenv').config();
 const express = require("express");
 const session = require("express-session");
-const cors = require("cors");
 const { Pool } = require("pg");
 
 const app = express();
@@ -27,147 +26,134 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(express.static("public"));
 
-app.use(cors({
-    origin: "http://localhost:5173", // your React dev server
-    credentials: true
-}));
-
 app.use(session({
     secret: "your-secret-key",
     resave: false,
-    saveUninitialized: false,
-    cookie: {
-        sameSite: "lax" // allows the cookie to be sent from React's origin
-    }
+    saveUninitialized: false
 }));
 
-// Get all blogs (JSON API for React)
-app.get("/api/blogs", async (req, res) => {
+// Home
+app.get("/", async (req, res) => {
     try {
         const result = await pool.query("SELECT * FROM blogs ORDER BY date_created DESC");
-        res.json({ blogs: result.rows, user: req.session.user || null });
+        res.render("index", { blogs: result.rows, user: req.session.user });
     } catch (err) {
         console.error(err);
-        res.status(500).json({ error: "Error loading blogs" });
+        res.send("Error loading blogs");
     }
 });
 
-// Who is currently logged in? (React needs this on page load/refresh,
-// since it has no memory of session state between browser reloads)
-app.get("/api/me", (req, res) => {
-    res.json({ user: req.session.user || null });
+// Show signup page
+app.get("/signup", (req, res) => {
+    res.render("signup", { error: null });
 });
 
-// Handle signup form (React posts JSON here directly, no GET page needed
-// since React renders the signup form itself)
-app.post("/api/signup", async (req, res) => {
+// Handle signup form
+app.post("/signup", async (req, res) => {
     const { user_id, password, name } = req.body;
     try {
         const existing = await pool.query("SELECT * FROM users WHERE user_id = $1", [user_id]);
         if (existing.rows.length > 0) {
-            return res.status(400).json({ error: "Username already taken, please choose another." });
+            return res.render("signup", { error: "Username already taken, please choose another." });
         }
         await pool.query("INSERT INTO users (user_id, password, name) VALUES ($1, $2, $3)", [user_id, password, name]);
-        res.json({ success: true });
+        res.redirect("/signin");
     } catch (err) {
         console.error(err);
-        res.status(500).json({ error: "Error signing up" });
+        res.send("Error signing up");
     }
 });
 
+// Show signin page
+app.get("/signin", (req, res) => {
+    res.render("signin", { error: null });
+});
+
 // Handle signin form
-app.post("/api/signin", async (req, res) => {
+app.post("/signin", async (req, res) => {
     const { user_id, password } = req.body;
     try {
         const result = await pool.query("SELECT * FROM users WHERE user_id = $1 AND password = $2", [user_id, password]);
         if (result.rows.length === 0) {
-            return res.status(401).json({ error: "Incorrect username or password." });
+            return res.render("signin", { error: "Incorrect username or password." });
         }
         req.session.user = result.rows[0];
-        res.json({ success: true, user: result.rows[0] });
+        res.redirect("/");
     } catch (err) {
         console.error(err);
-        res.status(500).json({ error: "Error signing in" });
+        res.send("Error signing in");
     }
 });
 
 // Create a new blog post
-app.post("/api/blogs", async (req, res) => {
-    if (!req.session.user) return res.status(401).json({ error: "You must sign in to post." });
+app.post("/create", async (req, res) => {
+    if (!req.session.user) return res.redirect("/signin");
     const { title, body } = req.body;
     const { name, user_id } = req.session.user;
     try {
-        const result = await pool.query(
-            "INSERT INTO blogs (creator_name, creator_user_id, title, body, date_created) VALUES ($1, $2, $3, $4, NOW()) RETURNING *",
+        await pool.query(
+            "INSERT INTO blogs (creator_name, creator_user_id, title, body, date_created) VALUES ($1, $2, $3, $4, NOW())",
             [name, user_id, title, body]
         );
-        res.json({ success: true, blog: result.rows[0] });
+        res.redirect("/");
     } catch (err) {
         console.error(err);
-        res.status(500).json({ error: "Error creating post" });
+        res.send("Error creating post");
     }
 });
 
-// Get a single blog post (React uses this if it needs to (re)load one post directly)
-app.get("/api/blogs/:id", async (req, res) => {
+// Show edit page
+app.get("/edit/:id", async (req, res) => {
+    if (!req.session.user) return res.redirect("/signin");
     const { id } = req.params;
     try {
         const result = await pool.query("SELECT * FROM blogs WHERE blog_id = $1", [id]);
-        if (result.rows.length === 0) return res.status(404).json({ error: "Post not found" });
-        res.json({ blog: result.rows[0] });
+        const blog = result.rows[0];
+        if (blog.creator_user_id !== req.session.user.user_id) return res.redirect("/");
+        res.render("edit", { blog });
     } catch (err) {
         console.error(err);
-        res.status(500).json({ error: "Error loading post" });
+        res.send("Error loading post");
     }
 });
 
-// Handle edit form submission
-app.put("/api/blogs/:id", async (req, res) => {
-    if (!req.session.user) return res.status(401).json({ error: "You must sign in." });
+// Handle edit form
+app.post("/edit/:id", async (req, res) => {
+    if (!req.session.user) return res.redirect("/signin");
     const { id } = req.params;
     const { title, body } = req.body;
     try {
         const result = await pool.query("SELECT * FROM blogs WHERE blog_id = $1", [id]);
         const blog = result.rows[0];
-        if (!blog) return res.status(404).json({ error: "Post not found" });
-        if (blog.creator_user_id !== req.session.user.user_id) {
-            return res.status(403).json({ error: "You can only edit your own posts." });
-        }
-        const updated = await pool.query(
-            "UPDATE blogs SET title = $1, body = $2 WHERE blog_id = $3 RETURNING *",
-            [title, body, id]
-        );
-        res.json({ success: true, blog: updated.rows[0] });
+        if (blog.creator_user_id !== req.session.user.user_id) return res.redirect("/");
+        await pool.query("UPDATE blogs SET title = $1, body = $2 WHERE blog_id = $3", [title, body, id]);
+        res.redirect("/");
     } catch (err) {
         console.error(err);
-        res.status(500).json({ error: "Error updating post" });
+        res.send("Error updating post");
     }
 });
 
 // Handle delete
-app.delete("/api/blogs/:id", async (req, res) => {
-    if (!req.session.user) return res.status(401).json({ error: "You must sign in." });
+app.post("/delete/:id", async (req, res) => {
+    if (!req.session.user) return res.redirect("/signin");
     const { id } = req.params;
     try {
         const result = await pool.query("SELECT * FROM blogs WHERE blog_id = $1", [id]);
         const blog = result.rows[0];
-        if (!blog) return res.status(404).json({ error: "Post not found" });
-        if (blog.creator_user_id !== req.session.user.user_id) {
-            return res.status(403).json({ error: "You can only delete your own posts." });
-        }
+        if (blog.creator_user_id !== req.session.user.user_id) return res.redirect("/");
         await pool.query("DELETE FROM blogs WHERE blog_id = $1", [id]);
-        res.json({ success: true });
+        res.redirect("/");
     } catch (err) {
         console.error(err);
-        res.status(500).json({ error: "Error deleting post" });
+        res.send("Error deleting post");
     }
 });
 
 // Sign out
-app.post("/api/signout", (req, res) => {
-    req.session.destroy(() => {
-        res.json({ success: true });
-    });
+app.get("/signout", (req, res) => {
+    req.session.destroy();
+    res.redirect("/");
 });
 
 app.listen(PORT, () => {
